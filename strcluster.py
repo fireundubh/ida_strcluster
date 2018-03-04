@@ -8,56 +8,69 @@
 # analysis more effectively. Requires IDA Pro >= 6.9.
 
 import re
-
-import idautils
-import idc
-import idaapi
-from idaapi import PluginForm
-
 import time
 
-from PyQt5 import QtCore
-from PyQt5 import QtWidgets
-from PyQt5 import QtGui
+import PyQt5.QtCore as QtCore
+import PyQt5.QtGui as QtGui
+import PyQt5.QtWidgets as QtWidgets
+from PyQt5.Qt import QApplication
+
+import idaapi
+import idautils
+import idc
+from idaapi import PluginForm
 
 # Change this flag if you prefer to not filter while you type.  I personally don't
 # like this as it removes results that I may look at while creating the next
 # input, but also typing becomes slow on a large number of strings.
-LIVE_SEARCH = True
+LIVE_SEARCH = False
 
-DEBUG          = False
-PROFILE        = False
-NO_FUNC        = '0_sub'
-MATCH_COLOR    = QtGui.QColor(0xC7,0xF2, 0xCF)
-NOMATCH_COLOR  = QtGui.QColor('white')
+DEBUG = False
+PROFILE = False
+NO_FUNC = '0_sub'
+MATCH_COLOR = QtGui.QColor(0xC7, 0xF2, 0xCF)
+NOMATCH_COLOR = QtGui.QColor('white')
 
-FUN_COLUMN     = 0
-XREF_COLUMN    = 1
-STR_COLUMN     = 2
+FUN_COLUMN = 0
+XREF_COLUMN = 1
+STR_COLUMN = 2
 
-if PROFILE == True:
+cb = QApplication.clipboard()
+
+if PROFILE:
 	start_time = time.time()
-	import cProfile, pstats, StringIO
+	import cProfile
+	import pstats
+	import StringIO
+
 	pr = cProfile.Profile()
 	pr.enable()
 
+
 def dprint(s):
-	if DEBUG == True:
+	if DEBUG:
 		print(s)
+
 
 class StringItem(QtGui.QStandardItem):
 	def __init__(self, s, ea):
 		super(QtGui.QStandardItem, self).__init__(s)
 		self.ea = ea
 
-class IdaString():
+
+class IdaString:
 	def __init__(self, s, ea, xref):
 		self.s = s
 		self.ea = ea
 		self.xref = xref
 
+
 class StringClusterMap(PluginForm):
-	def getIcon(self):
+	def __init__(self):
+		super(StringClusterMap, self).__init__()
+		self.filter_regex = None
+
+	def get_icon(self):
 		icon = (
 			'0000010001001010000001002000680400001600000028000000100000002000000001'
 			'0020000000000000040000130b0000130b00000000000000000000000000000773e600'
@@ -101,47 +114,69 @@ class StringClusterMap(PluginForm):
 	def OnCreate(self, form):
 		self.parent = self.FormToPyQtWidget(form)
 		self.items = {}
-		self.PopulateForm()
+		self.populate_form()
 
-	def xrefsTo(self, ea):
+	def xrefs_to(self, ea):
 		s = []
-		map(lambda x: s.append(x.frm), XrefsTo(ea))
+		map(lambda x: s.append(x.frm), idautils.XrefsTo(ea))
 		return s
-	
-	def funXrefs(self):
+
+	def fun_xrefs(self):
 		res = {}
 		for s in idautils.Strings():
 			s_ea = s.ea
 			s_v = str(s).rstrip()
-			dprint("checking %x - %s" %(s_ea, s_v))
-			s_xrefs_eas = self.xrefsTo(s_ea)
+			dprint('checking %x - %s' % (s_ea, s_v))
+			s_xrefs_eas = self.xrefs_to(s_ea)
 			if not s_xrefs_eas:
-				dprint("no xref found for %s" %(s_v))
+				dprint('no xref found for %s' % s_v)
 				s_xrefs_eas = [s_ea]
-	
+
 			# same string can be xref'ed by more than one function
 			for fs_ea in s_xrefs_eas:
-				dprint("looking for function of %x" %(fs_ea))
+				dprint('looking for function of %x' % fs_ea)
 
-				f_name = GetFunctionName(fs_ea)
-				f_ea = GetFunctionAttr(fs_ea, FUNCATTR_START)
-				if not f_name or f_name == '': f_name = NO_FUNC
+				f_name = idaapi.get_func_name(fs_ea)
+				f_ea = idc.get_func_attr(fs_ea, idc.FUNCATTR_START)
+				if not f_name or f_name == '':
+					f_name = NO_FUNC
 				if f_ea in res:
 					res[f_ea]['strings'][s_v] = IdaString(s_v, s_ea, fs_ea)
 				else:
 					res[f_ea] = dict({
-						'name' : f_name,
-						'strings' : { s_v : IdaString(s_v, s_ea, fs_ea) }
+						'name': f_name,
+						'strings': {s_v: IdaString(s_v, s_ea, fs_ea)}
 					})
 
 		return res
 
-	def hideItem(self, item, search_text):
-		if search_text ==  "":
+	def hide_item_with_xref_range(self, item, search_text, xref, xref_min, xref_max):
+		# show everything
+		if search_text == '' and (xref_min == '' or xref_max == ''):
 			item.setBackground(NOMATCH_COLOR)
 			return False
 
-		if search_text != "" and self.filter_regex != None:
+		# if filtering by range, filter results by xref range
+		if xref_min != '' and xref_max != '':
+			# if xref within range
+			if int(xref_min, 16) <= int(xref.text(), 16) <= int(xref_max, 16):
+				# then filter by text, but if no text, then return False (not hidden)
+				return self.hide_item_by_search_text(item, search_text)
+			else:
+				# otherwise, hide that sucker
+				item.setBackground(NOMATCH_COLOR)
+				return True
+
+		# if not filtering by range, just filter results by text as normal
+		else:
+			return self.hide_item_by_search_text(item, search_text)
+
+	def hide_item_by_search_text(self, item, search_text):
+		if search_text == '':
+			item.setBackground(NOMATCH_COLOR)
+			return False
+
+		if search_text != '' and self.filter_regex is not None:
 			res = self.filter_regex.search(item.text())
 			if res:
 				item.setBackground(MATCH_COLOR)
@@ -150,38 +185,38 @@ class StringClusterMap(PluginForm):
 				item.setBackground(NOMATCH_COLOR)
 				return True
 
-		if search_text != "" and search_text.lower() in item.text().lower():
+		if search_text != '' and search_text.lower() in item.text().lower():
 			item.setBackground(MATCH_COLOR)
 			return False
 		else:
 			item.setBackground(NOMATCH_COLOR)
 			return True
 
-	def liveSearchCheckBox(self, event):
+	def live_search_check_box(self):
 		self.live_search = not self.live_search
 
-	def checkBoxEvent(self, event):
-		self.filterEvent()
+	def check_box_event(self):
+		self.filter_event()
 
-	def filterEvent(self, event = None):
-		if event != None:
+	def filter_event(self, event=None):
+		if event is not None:
 			QtWidgets.QLineEdit.keyReleaseEvent(self.filter_line, event)
 
-		if event and (self.live_search == False and event.key() != QtCore.Qt.Key_Enter and event.key() != QtCore.Qt.Key_Return):
+		if event and (self.live_search is False and event.key() != QtCore.Qt.Key_Enter and event.key() != QtCore.Qt.Key_Return):
 			return
 
 		search_text = self.filter_line.text()
+		xref_min = self.filter_xref_min.text()
+		xref_max = self.filter_xref_max.text()
 
-		if search_text != "" and self.regexckb.isChecked():
+		if search_text != '' and self.regexckb.isChecked():
 			self.filter_regex = re.compile(search_text)
-		else:
-			self.filter_regex = None
 
 		res_strs = 0
 		for idx in xrange(self.model.rowCount()):
 			item = self.model.item(idx)
 			n_strings = item.rowCount()
-			hide = True if search_text != "" else False
+			hide = True if search_text != '' else False
 
 			for c_idx in xrange(n_strings):
 				hide_row = self.hidecheckb.isChecked()
@@ -189,10 +224,10 @@ class StringClusterMap(PluginForm):
 				c_item2 = item.child(c_idx, STR_COLUMN)
 
 				for i in [item, c_item1, c_item2]:
-					if not self.hideItem(i, search_text):
+					if not self.hide_item_with_xref_range(i, search_text, c_item1, xref_min, xref_max):
 						hide = False
 						hide_row = False
-						if i is c_item2: # we only want to count strs
+						if i is c_item2:  # we only want to count strs
 							res_strs += 1
 
 				self.view.setRowHidden(c_idx, self.model.indexFromItem(item), hide_row)
@@ -204,9 +239,19 @@ class StringClusterMap(PluginForm):
 				else:
 					self.view.expand(self.model.indexFromItem(item))
 
-		self.results.setText('%d strings' %(res_strs))
+		self.results.setText('%d strings' % res_strs)
 
-	def doubleClickEvent(self, event):
+	def reset_event(self, event):
+		self.filter_line.setText('')
+		self.filter_xref_min.setText('')
+		self.filter_xref_max.setText('')
+
+		self.hidecheckb.setChecked(True)
+		self.hidenscheckb.setChecked(False)
+		self.regexckb.setChecked(False)
+		self.live_searchcb.setChecked(LIVE_SEARCH)
+
+	def double_click_event(self, event):
 		index = event.pos()
 		try:
 			item = self.model.itemFromIndex(self.view.indexAt(event.pos()))
@@ -218,18 +263,45 @@ class StringClusterMap(PluginForm):
 		if ea != -1:
 			idc.Jump(ea)
 
-	def PopulateForm(self):
-		self.parent.setWindowIcon(self.getIcon())
+	def copy_results_event(self):
+		cb.clear(mode=cb.Clipboard)
+
+		search_text = self.filter_line.text()
+		xref_min = self.filter_xref_min.text()
+		xref_max = self.filter_xref_max.text()
+
+		if search_text != '' and self.regexckb.isChecked():
+			self.filter_regex = re.compile(search_text)
+
+		results = list()
+		for idx in xrange(self.model.rowCount()):
+			item = self.model.item(idx)
+			n_strings = item.rowCount()
+
+			for c_idx in xrange(n_strings):
+				c_item1 = item.child(c_idx, XREF_COLUMN)
+				c_item2 = item.child(c_idx, STR_COLUMN)
+
+				for i in [item, c_item1, c_item2]:
+					if not self.hide_item_with_xref_range(i, search_text, c_item1, xref_min, xref_max):
+						result = '%s\t%s\t%s' % (item.text(), c_item1.text(), c_item2.text())
+						if result not in results:
+							results.append(result)
+
+		cb.setText('\n'.join(results), mode=cb.Clipboard)
+
+	def populate_form(self):
+		self.parent.setWindowIcon(self.get_icon())
 		# gather data
 		if not self.items:
-			self.items = self.funXrefs()
+			self.items = self.fun_xrefs()
 
-		if PROFILE == True:
-			print("--- %s seconds ---" % (time.time() - start_time))
+		if PROFILE:
+			print('--- %s seconds ---' % (time.time() - start_time))
 
 		# create layout
 		self.layout = QtWidgets.QVBoxLayout()
-		self.layout.setContentsMargins(0,0,0,0)
+		self.layout.setContentsMargins(0, 0, 0, 0)
 		self.layout.setSpacing(0)
 		self.view = QtWidgets.QTreeView()
 		self.view.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
@@ -247,17 +319,18 @@ class StringClusterMap(PluginForm):
 			fun_strs = len(fi['strings'])
 			res_strs += fun_strs
 
-			parent = StringItem('%s (%d)' %(fun_name, fun_strs), fun_ea)
+			parent = StringItem('%s (%d)' % (fun_name, fun_strs), fun_ea)
 			parent.setEditable(False)
 
 			for (s_v, s) in fi['strings'].iteritems():
-				ilist = [StringItem('', -1), StringItem('%x' %(s.xref), s.xref), StringItem(s_v, s.ea)]
-				for i in ilist: i.setEditable(False)
+				ilist = [StringItem('', -1), StringItem('%x' % s.xref, s.xref), StringItem(s_v, s.ea)]
+				for i in ilist:
+					i.setEditable(False)
 				parent.appendRow(ilist)
 
 			self.model.appendRow(parent)
-			# make sure the first column is as large as the function name
-			#self.view.setFirstColumnSpanned(idx, self.view.rootIndex(), True)
+		# make sure the first column is as large as the function name
+		# self.view.setFirstColumnSpanned(idx, self.view.rootIndex(), True)
 
 		index = self.model.indexFromItem(parent)
 		self.view.expandAll()
@@ -269,15 +342,22 @@ class StringClusterMap(PluginForm):
 		self.ctrlbox = QtWidgets.QGroupBox()
 		self.filterlayout = QtWidgets.QGridLayout()
 		self.ctrllayout = QtWidgets.QHBoxLayout()
-		self.ctrllayout.setContentsMargins(0,0,0,0)
-		self.filterlayout.setContentsMargins(0,1,0,0)
+		self.ctrllayout.setContentsMargins(0, 0, 0, 0)
+		self.filterlayout.setContentsMargins(0, 1, 0, 0)
 
-		self.filter_line = QtWidgets.QLineEdit() #FilterLine()
-		self.results = QtWidgets.QLabel('%d strings' %(res_strs))
+		self.filter_line = QtWidgets.QLineEdit()  # FilterLine()
+		self.results = QtWidgets.QLabel('%d strings' % res_strs)
 		self.hidecheckb = QtWidgets.QCheckBox('Hide no match')
 		self.hidenscheckb = QtWidgets.QCheckBox('Collapse ' + NO_FUNC)
 		self.regexckb = QtWidgets.QCheckBox('Regex')
 		self.live_searchcb = QtWidgets.QCheckBox('Live search')
+		self.filter_xref_min_label = QtWidgets.QLabel('Xref Min:')
+		self.filter_xref_min = QtWidgets.QLineEdit()
+		self.filter_xref_max_label = QtWidgets.QLabel('Xref Max:')
+		self.filter_xref_max = QtWidgets.QLineEdit()
+		self.reset_all = QtWidgets.QPushButton('Reset')
+		self.copy_results = QtWidgets.QPushButton('Copy results to clipboard')
+
 		self.hidecheckb.setChecked(True)
 		self.hidenscheckb.setChecked(False)
 		self.regexckb.setChecked(False)
@@ -285,19 +365,32 @@ class StringClusterMap(PluginForm):
 		self.live_search = LIVE_SEARCH
 		self.filter_regex = None
 
-		self.live_searchcb.stateChanged.connect(self.liveSearchCheckBox)
-		self.hidecheckb.stateChanged.connect(self.checkBoxEvent)
-		self.hidenscheckb.stateChanged.connect(self.checkBoxEvent)
-		self.regexckb.stateChanged.connect(self.checkBoxEvent)
-		self.filter_line.keyReleaseEvent = self.filterEvent
-		self.view.mouseDoubleClickEvent = self.doubleClickEvent
+		self.filter_xref_min.setMaximumWidth(128)
+		self.filter_xref_max.setMaximumWidth(128)
+
+		self.live_searchcb.stateChanged.connect(self.live_search_check_box)
+		self.hidecheckb.stateChanged.connect(self.check_box_event)
+		self.hidenscheckb.stateChanged.connect(self.check_box_event)
+		self.regexckb.stateChanged.connect(self.check_box_event)
+		self.filter_line.keyReleaseEvent = self.filter_event
+		self.filter_xref_min.keyReleaseEvent = self.filter_event
+		self.filter_xref_max.keyReleaseEvent = self.filter_event
+		self.view.mouseDoubleClickEvent = self.double_click_event
+		self.reset_all.clicked.connect(self.reset_event)
+		self.copy_results.clicked.connect(self.copy_results_event)
 		self.filterlayout.addWidget(self.filter_line, 1, 1)
 		self.filterlayout.addWidget(self.results, 1, 2)
 
+		self.ctrllayout.addWidget(self.reset_all)
 		self.ctrllayout.addWidget(self.hidecheckb)
 		self.ctrllayout.addWidget(self.regexckb)
 		self.ctrllayout.addWidget(self.hidenscheckb)
 		self.ctrllayout.addWidget(self.live_searchcb)
+		self.ctrllayout.addWidget(self.filter_xref_min_label)
+		self.ctrllayout.addWidget(self.filter_xref_min)
+		self.ctrllayout.addWidget(self.filter_xref_max_label)
+		self.ctrllayout.addWidget(self.filter_xref_max)
+		self.ctrllayout.addWidget(self.copy_results)
 		self.ctrllayout.addStretch()
 
 		self.layout.addWidget(self.filterbox)
@@ -310,8 +403,8 @@ class StringClusterMap(PluginForm):
 		# sorted within their respective parents, which can be confusing at first.
 		self.view.setSortingEnabled(True)
 
-		if PROFILE == True:
-			print("--- %s seconds ---" % (time.time() - start_time))
+		if PROFILE:
+			print('--- %s seconds ---' % (time.time() - start_time))
 			s = StringIO.StringIO()
 			sortby = 'cumulative'
 			ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
@@ -321,19 +414,20 @@ class StringClusterMap(PluginForm):
 	def OnClose(self, form):
 		pass
 
-class ida_string_cluster_plugin(idaapi.plugin_t):
+
+class IdaStringClusterPlugin(idaapi.plugin_t):
 	flags = idaapi.PLUGIN_OK
-	comment = ""
-	help = ""
-	wanted_name = "Comsecuris StringCluster"
-	wanted_hotkey = "Alt-s"
+	comment = ''
+	help = ''
+	wanted_name = 'Comsecuris StringCluster'
+	wanted_hotkey = 'Alt-s'
 
 	def init(self):
 		return idaapi.PLUGIN_OK
-	
+
 	def run(self, arg):
 		plg = StringClusterMap()
-		plg.Show("StringCluster")
+		plg.Show('StringCluster')
 		return
 
 	def term(self):
@@ -341,4 +435,4 @@ class ida_string_cluster_plugin(idaapi.plugin_t):
 
 
 def PLUGIN_ENTRY():
-	return ida_string_cluster_plugin()
+	return IdaStringClusterPlugin()
